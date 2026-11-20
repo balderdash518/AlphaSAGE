@@ -1,3 +1,4 @@
+import os
 from typing import List, Union, Optional, Tuple, Dict
 from enum import IntEnum
 import numpy as np
@@ -51,6 +52,9 @@ class StockData:
                  qlib_path:Union[str,Dict] = "",
                  freq:str = 'day',
                  ) -> None:
+        if instrument != 'sp500':
+            # the shared AlphaData export when $ALPHASAGE_QLIB_PATH or $QLIB_PATH_CN is set
+            qlib_path = os.environ.get("ALPHASAGE_QLIB_PATH") or os.environ.get("QLIB_PATH_CN") or qlib_path
         self._init_qlib(qlib_path)
         self.df_bak = None
         self.raw = raw
