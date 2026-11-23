@@ -92,6 +92,10 @@ class StockData:
         cal: np.ndarray = D.calendar(freq=self.freq)
         start_index = cal.searchsorted(pd.Timestamp(self._start_time))  # type: ignore
         end_index = cal.searchsorted(pd.Timestamp(self._end_time))  # type: ignore
+        if start_index < self.max_backtrack_days:
+            # a negative index would silently wrap to the end of the calendar
+            raise ValueError(f"{self._start_time} needs {self.max_backtrack_days} trading days of history, "
+                             f"but the calendar starts at {cal[0]}")
         real_start_time = cal[start_index - self.max_backtrack_days]
         if cal[end_index] != pd.Timestamp(self._end_time):
             end_index -= 1

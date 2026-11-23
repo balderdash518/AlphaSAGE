@@ -13,6 +13,7 @@ from alphagen.data.tree import ExpressionBuilder, OutOfDataRangeError
 from ..config import *
 from ..alpha_pool import AlphaPoolGFN
 from ..preprocessors import IntegerPreprocessor
+from ..runlog import RUN
 
 class GFNEnvCore(DiscreteEnv):
     def __init__(self, pool: AlphaPoolGFN, 
@@ -163,6 +164,9 @@ class GFNEnvCore(DiscreteEnv):
                     reward = ic_reward + self.ssl_weight * ssl_reward + self.nov_weight * nov_reward
                 except OutOfDataRangeError:
                     reward = 0.0
+                    RUN.record_invalid()
+            else:
+                RUN.record_invalid()
             rewards.append(np.maximum(reward, np.exp(-10)))
         
         return torch.tensor(rewards, dtype=torch.float, device=self.device)

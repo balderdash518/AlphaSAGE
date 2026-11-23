@@ -21,6 +21,8 @@ from src.alphagen.data.expression import *
 from src.alphagen_qlib.stock_data import StockData
 from src.alphagen.utils.correlation import batch_pearsonr
 from src.alpha_gfn.gflownet import EntropyTBGFlowNet
+from src.alpha_gfn.runlog import RUN
+from src.alphagen_qlib.alphadata import use_snapshot, get_split_dates
 
 from gfn.samplers import Sampler
 from gfn.gflownet.trajectory_balance import TBGFlowNet
@@ -149,9 +151,22 @@ def train(args):
         QLIB_PATH = '/your_path/data/qlib_data/us_data_qlib'
     else:    
         QLIB_PATH = '/your_path/data/qlib_data/cn_data_rolling'
+    # With --snapshot the data is read from that AlphaData version's Qlib export, and --split takes the
+    # training period from its splits.yaml; otherwise the original dates are used
+    provenance = use_snapshot(args.snapshot) if args.snapshot else {
+        'snapshot': '', 'qlib_path': os.environ.get('ALPHASAGE_QLIB_PATH', QLIB_PATH), 'snapshot_sha256': ''}
+    train_start, train_end = ('2010-01-01', '2016-12-31')
+    if args.split:
+        assert args.snapshot, '--split needs --snapshot'
+        split_dates = get_split_dates(args.snapshot, args.split)
+        train_start, train_end = split_dates[0]
+    log_start, log_end = '2018-01-01', '2020-12-31'
+    if args.split:
+        # under a split the logger's monitoring window must stay inside the training period
+        assert log_end <= train_end, f'logger window {log_start}..{log_end} reaches past the training end {train_end}'
     # Initialize StockData and target expression
-    data = StockData(instrument=args.instrument, start_time='2010-01-01', end_time='2016-12-31', qlib_path=QLIB_PATH)
-    data_test = StockData(instrument=args.instrument, start_time='2018-01-01', end_time='2020-12-31', qlib_path=QLIB_PATH)
+    data = StockData(instrument=args.instrument, start_time=train_start, end_time=train_end, qlib_path=QLIB_PATH)
+    data_test = StockData(instrument=args.instrument, start_time=log_start, end_time=log_end, qlib_path=QLIB_PATH)
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
     
@@ -202,9 +217,20 @@ def train(args):
         'data/gfn_logs',
         f'pool_{args.pool_capacity}',
         f'gfn_{args.encoder_type}_{args.instrument}_{args.pool_capacity}_{args.seed}-{args.entropy_coef}-{args.entropy_temperature}-{args.mask_dropout_prob}-{args.ssl_weight}-{args.nov_weight}-{args.weight_decay_type}-{args.final_weight_ratio}'
+        # keep runs on different data or splits apart
+        + (f'-{args.snapshot}' if args.snapshot else '') + (f'-{args.split}' if args.split else '')
     )
     os.makedirs(log_dir, exist_ok=True)
     logger = GFNLogger(pf, pool, log_dir, data_test, target)
+    RUN.start(log_dir,
+              config={'method': 'AlphaSAGE', **vars(args), 'train': (train_start, train_end),
+                      'logger_window': (log_start, log_end), 'target': str(target),
+                      'max_expr_length': MAX_EXPR_LENGTH, 'hidden_dim': HIDDEN_DIM,
+                      'num_encoder_layers': NUM_ENCODER_LAYERS, 'learning_rate': LEARNING_RATE,
+                      'features': [f.name for f in FEATURES], 'operators': [op.__name__ for op in OPERATORS],
+                      'delta_times': DELTA_TIMES, 'constants': CONSTANTS},
+              provenance=provenance)
+    registry = args.registry or os.environ.get('ALPHASAGE_REGISTRY', 'out/registry.csv')
 
     # Training loop
     losses = []
@@ -228,6 +254,7 @@ def train(args):
     print("=" * 50)
 
     for episode in tqdm(range(n_episodes)):
+        RUN.round = episode
         # Get current weights from scheduler
         current_ssl_weight, current_nov_weight = weight_scheduler.get_current_weights()
         
@@ -255,6 +282,7 @@ def train(args):
             logger.log_metrics(episode)
             logger.save_checkpoint(episode)
             logger.show_pool_state()
+            RUN.save([str(e) for e in pool.exprs[:pool.size]])
             print(f"----Episode {episode}/{n_episodes} done----")
             print(f"Current weights: SSL={current_ssl_weight:.4f}, Novelty={current_nov_weight:.4f}")
             
@@ -266,6 +294,11 @@ def train(args):
         weight_scheduler.step()
 
     logger.close()
+    RUN.round = n_episodes
+    RUN.save([str(e) for e in pool.exprs[:pool.size]], final=True)
+    RUN.append_registry(registry, {'method': 'AlphaSAGE', 'instruments': args.instrument,
+                                   'split': args.split or '', 'seed': args.seed,
+                                   'zoo_target': args.pool_capacity, 'n_episodes': n_episodes})
 
 
 if __name__ == '__main__':
@@ -284,6 +317,9 @@ if __name__ == '__main__':
     parser.add_argument('--nov_weight', type=float, default=0.5, help='Initial weight for novelty reward (will decay during training)')
     parser.add_argument('--weight_decay_type', type=str, default='linear', choices=['linear', 'exponential', 'polynomial'], help='Type of weight decay to apply')
     parser.add_argument('--final_weight_ratio', type=float, default=0.0, help='Final weight as ratio of initial weight (e.g., 0.1 means decay to 10% of initial)')
+    parser.add_argument('--snapshot', type=str, default=None, help='AlphaData snapshot to read (its qlib-last export)')
+    parser.add_argument('--split', type=str, default=None, help='split in the snapshot splits.yaml; mining reads its training period only')
+    parser.add_argument('--registry', type=str, default=None, help='registry.csv that gets one row per run (default $ALPHASAGE_REGISTRY or out/registry.csv)')
     args = parser.parse_args()
     print(args)
     train(args)

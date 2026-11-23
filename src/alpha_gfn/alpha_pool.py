@@ -6,6 +6,7 @@ from torch import Tensor
 from alphagen.models.alpha_pool import AlphaPool, AlphaPoolBase
 from alphagen.data.expression import Expression
 from alphagen_qlib.stock_data import StockData
+from .runlog import RUN
 
 
 class AlphaPoolGFN(AlphaPool):
@@ -29,16 +30,22 @@ class AlphaPoolGFN(AlphaPool):
         value = self._normalize_by_day(expr.evaluate(self.data))
         ic_ret, ic_mut = self._calc_ics(value, ic_mut_threshold=0.99)
         if ic_ret is None or ic_mut is None:
+            # _calc_ics gives None when the factor correlates > 0.99 with a pool member
+            RUN.record_eval(str(expr), {}, 'rejected', 'duplicate_of_pool_member')
             return 0.0, 1.0
         ic_ret = np.abs(ic_ret)
         ic_mut = np.abs(ic_mut)
-        
+        metrics = {'ic': ic_ret, 'max_mut_ic': np.max(ic_mut) if ic_mut.size > 0 else np.nan}
+
         # Check if we should add this factor to the pool
         if self.size < self.capacity:
             # Pool not full, add directly if correlation constraint is satisfied
             if ic_mut.size == 0 or np.max(ic_mut) <= self.ic_mut_threshold:
                 self._add_factor(expr, value, ic_ret, ic_mut, embedding)
                 print(f"[Pool Add] {expr}")
+                RUN.record_eval(str(expr), metrics, 'added', 'pool_not_full')
+            else:
+                RUN.record_eval(str(expr), metrics, 'rejected', 'corr_with_pool')
         else:
             # Pool is full, check if this factor is better than the worst one
             min_ic_idx = np.argmin(self.single_ics[:self.size])
@@ -48,11 +55,16 @@ class AlphaPoolGFN(AlphaPool):
                 # Add the new factor first (this will make size = capacity + 1)
                 self._add_factor(expr, value, ic_ret, ic_mut, embedding)
                 print(f"[Pool Add] {expr}")
+                RUN.record_eval(str(expr), metrics, 'added', 'replaced_lowest_ic')
                 # Then remove the worst factor using _pop
-                print(f"[Pool Pop] {self.exprs[np.argmin(self.single_ics[:self.size])]}")
+                popped = self.exprs[np.argmin(self.single_ics[:self.size])]
+                print(f"[Pool Pop] {popped}")
                 self._pop()
+                RUN.record_decision(str(popped), 'removed', 'lowest_ic_in_full_pool')
             else:
                 print(f"[Pool Reject] {expr}")
+                RUN.record_eval(str(expr), metrics, 'rejected',
+                                'ic_below_pool_min' if ic_ret <= min_ic else 'corr_with_pool')
         
         return ic_ret, (1 - np.max(ic_mut)) if ic_mut.size > 0 else 1.0
     

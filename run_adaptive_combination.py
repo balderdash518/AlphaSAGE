@@ -13,6 +13,7 @@ import numpy as np
 
 from alphagen.utils.correlation import batch_pearsonr, batch_spearmanr, batch_ret, batch_sharpe_ratio, batch_max_drawdown
 from gan.utils.builder import exprs2tensor
+from alphagen_qlib.alphadata import use_snapshot, get_split_dates
 
 
 def remove_linearly_dependent_rows(x, y, to_pred, tol=1e-10):
@@ -297,14 +298,23 @@ def run(args):
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -args.label_days) / close - 1
 
+    train_start_time = '2010-01-01'
     train_end_time = f'{args.train_end_year}-12-31'
     valid_start_time = f'{args.train_end_year + 1}-01-01'
     valid_end_time = f'{args.train_end_year + 1}-12-31'
     test_start_time = f'{args.train_end_year + 2}-01-01'
     test_end_time = f'{args.train_end_year + 4}-12-31'
+    # With --snapshot the data is read from that AlphaData version's Qlib export, and --split takes the
+    # train/valid/test dates from its splits.yaml instead of --train_end_year
+    if args.snapshot:
+        use_snapshot(args.snapshot)
+    if args.split:
+        assert args.snapshot, '--split needs --snapshot'
+        (train_start_time, train_end_time), (valid_start_time, valid_end_time), (test_start_time, test_end_time) = \
+            get_split_dates(args.snapshot, args.split)
 
     data_all = StockData(instrument=args.instruments,
-                         start_time='2010-01-01',
+                         start_time=train_start_time,
                          end_time=test_end_time,
                          qlib_path=QLIB_PATH)
     data_valid = StockData(instrument=args.instruments,
@@ -350,6 +360,9 @@ def run(args):
         
     else:
         fct_tensor = exprs2tensor(expressions, data_all, normalize=True)
+        # normalize_by_day only zeroes NaN; a factor whose cross-section overflows becomes inf,
+        # and a single inf turns every least-squares weight into NaN
+        fct_tensor = torch.nan_to_num(fct_tensor, nan=0., posinf=0., neginf=0.)
         tgt_tensor = exprs2tensor([target], data_all, normalize=False)
 
         # 3. Pre-calculate daily metrics for all factors
@@ -499,6 +512,8 @@ if __name__ == '__main__':
                         help='Path to a JSON file containing a list of alpha expressions.')
     parser.add_argument('--instruments', type=str, default='csi300')
     parser.add_argument('--train_end_year', type=int, default=2020)
+    parser.add_argument('--snapshot', type=str, default=None, help='AlphaData snapshot to read (its qlib-last export)')
+    parser.add_argument('--split', type=str, default=None, help='split in the snapshot splits.yaml (overrides --train_end_year)')
     parser.add_argument('--threshold_ric', type=float, default=0.015)
     parser.add_argument('--threshold_ricir', type=float, default=0.15)
     parser.add_argument('--seed', type=int, default=0)
